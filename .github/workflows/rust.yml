@@ -1,0 +1,186 @@
+on: [push, pull_request, workflow_dispatch]
+
+name: CI
+
+env:
+  # --cfg=web_sys_unstable_apis is required to enable the web_sys clipboard API which egui_web uses
+  # https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.Clipboard.html
+  # https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html
+  RUSTFLAGS: --cfg=web_sys_unstable_apis
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Install libgtk
+        run: sudo apt-get install libgtk-3-dev
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --all-features
+
+  check_wasm:
+    name: Check wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: wasm32-unknown-unknown
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --all-features --lib --target wasm32-unknown-unknown
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - run: sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgtk-3-dev
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --lib
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt
+      - name: Install libgtk
+        run: sudo apt-get install libgtk-3-dev
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: clippy
+      - name: Install libgtk
+        run: sudo apt-get install libgtk-3-dev
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          # args: -- -D warnings
+
+  trunk:
+    name: trunk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.76.0
+          target: wasm32-unknown-unknown
+          override: true
+      - name: Install libgtk
+        run: sudo apt-get install libgtk-3-dev
+      - name: Download and install Trunk binary
+        run: wget -qO- https://github.com/thedodd/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
+      - name: Build
+        run: ./trunk build
+
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: .exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: install Linux dependencies
+        if: contains(matrix.target, 'unknown-linux')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y webkit2gtk-4.1 libxdo-dev libayatana-appindicator3-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target=${{ matrix.target }}
+
+      - name: Rename
+        run: cp target/${{ matrix.target }}/release/ag-iso-terminal-designer${{ matrix.extension }} AgIsoTerminalDesigner-${{ matrix.target }}${{ matrix.extension }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AgIsoTerminalDesigner-${{ matrix.target }}${{ matrix.extension }}
+          path: AgIsoTerminalDesigner-${{ matrix.target }}${{ matrix.extension }}
+
+
+  # release:
+  #   needs: build
+  #   runs-on: ubuntu-latest
+
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+
+  #     - name: Download built CLIs
+  #       uses: actions/download-artifact@v4.1.7
+  #       with:
+  #         path: outputs
+        
+  #     - uses: svenstaro/upload-release-action@v2
+  #       name: Upload binaries to release
+  #       if: ${{ github.event_name == 'push' }}
+  #       with:
+  #         repo_token: ${{ secrets.GITHUB_TOKEN }}
+  #         file: AgIsoTerminalDesigner-${{ matrix.target }}${{ matrix.extension }}
+  #         asset_name: AgIsoTerminalDesigner-${{ matrix.target }}${{ matrix.extension }}
+  #         tag: ${{ github.ref }}
+  #         prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  #         overwrite: true

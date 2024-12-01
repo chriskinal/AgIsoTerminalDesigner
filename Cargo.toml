@@ -1,0 +1,31 @@
+[package]
+name = "ag-iso-terminal-designer"
+version = "0.1.0"
+edition = "2021"
+authors = ["Daan Steenbergen <d.steenbergen@student.tue.nl>"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+eframe = "0.27.2"
+# ag-iso-stack = { path = "../AgIsoStack-rs" }
+ag-iso-stack = { git = "https://github.com/Open-Agriculture/AgIsoStack-rs", branch = "daan/terminal-designer-changes" }
+rfd = "0.13"
+image = "0.25.1"
+getrandom = { version = "0.2.11", features = ["js"] }
+
+# native:
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tracing-subscriber = "0.3"
+futures = "0.3.28"
+
+# web:
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+
+[profile.release]
+opt-level = 2 # fast and small wasm
+
+# Optimize all dependencies even in debug builds:
+[profile.dev.package."*"]
+opt-level = 2
