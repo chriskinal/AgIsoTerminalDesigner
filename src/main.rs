@@ -11,6 +11,7 @@ use ag_iso_stack::object_pool::ObjectPool;
 use ag_iso_stack::object_pool::ObjectType;
 use ag_iso_terminal_designer::ConfigurableObject;
 use ag_iso_terminal_designer::EditorProject;
+use ag_iso_terminal_designer::InteractiveMaskRenderer;
 use ag_iso_terminal_designer::RenderableObject;
 use eframe::egui;
 use std::future::Future;
@@ -21,6 +22,7 @@ const OBJECT_HIERARCHY_ID: &str = "object_hierarchy_ui";
 
 enum FileDialogReason {
     LoadPool,
+    LoadProject,
     OpenImagePictureGraphics(ObjectId),
 }
 
@@ -29,6 +31,7 @@ pub struct DesignerApp {
     file_dialog_reason: Option<FileDialogReason>,
     file_channel: (Sender<Vec<u8>>, Receiver<Vec<u8>>),
     show_development_popup: bool,
+    new_object_dialog: Option<(ObjectType, String)>,
 }
 
 impl DesignerApp {
@@ -107,6 +110,7 @@ impl DesignerApp {
             file_dialog_reason: None,
             file_channel: std::sync::mpsc::channel(),
             show_development_popup: true,
+            new_object_dialog: None,
         }
     }
 }
@@ -134,7 +138,23 @@ impl DesignerApp {
         if let Ok(content) = self.file_channel.1.try_recv() {
             match self.file_dialog_reason {
                 Some(FileDialogReason::LoadPool) => {
-                    self.project = Some(EditorProject::from(ObjectPool::from_iop(content)));
+                    let project = EditorProject::from(ObjectPool::from_iop(content));
+                    // Apply smart naming to all objects that don't have custom names
+                    for object in project.get_pool().objects() {
+                        project.apply_smart_naming_to_object(object);
+                    }
+                    self.project = Some(project);
+                }
+                Some(FileDialogReason::LoadProject) => {
+                    match EditorProject::load_project(content) {
+                        Ok(project) => {
+                            self.project = Some(project);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to load project: {}", e);
+                            // TODO: Show error dialog
+                        }
+                    }
                 }
                 Some(FileDialogReason::OpenImagePictureGraphics(id)) => {
                     if let Some(pool) = &mut self.project {
@@ -168,28 +188,32 @@ impl DesignerApp {
             });
         }
     }
-}
 
-struct ObjectWrapper<'a> {
-    object: &'a Object,
-    pool: &'a ObjectPool,
-}
-
-impl<'a> ObjectWrapper<'a> {
-    fn new(object: &'a Object, pool: &'a ObjectPool) -> Self {
-        ObjectWrapper { object, pool }
-    }
-}
-
-impl<'a> egui::Widget for ObjectWrapper<'a> {
-    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        match self.object {
-            Object::DataMask(o) => o.render(ui, self.pool, Point::default()),
-            _ => (),
+    /// Open a file dialog to save a project file
+    fn save_project(&mut self) {
+        if let Some(project) = &self.project {
+            match project.save_project() {
+                Ok(contents) => {
+                    let task = rfd::AsyncFileDialog::new()
+                        .set_file_name("project.aitp")
+                        .add_filter("AgIsoTerminal Project", &["aitp"])
+                        .save_file();
+                    execute(async move {
+                        let file = task.await;
+                        if let Some(file) = file {
+                            _ = file.write(&contents).await;
+                        }
+                    });
+                }
+                Err(e) => {
+                    log::error!("Failed to save project: {}", e);
+                    // TODO: Show error dialog
+                }
+            }
         }
-        ui.label("")
     }
 }
+
 
 fn render_selectable_object(ui: &mut egui::Ui, object: &Object, project: &EditorProject) {
     let this_ui_id = ui.id();
@@ -341,6 +365,86 @@ impl eframe::App for DesignerApp {
             return;
         }
 
+        // Show new object name dialog
+        if let Some((object_type, mut name)) = self.new_object_dialog.clone() {
+            let mut should_create = false;
+            let mut should_cancel = false;
+            
+            egui::Window::new(format!("New {:?}", object_type))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Enter a name for the new object:");
+                    ui.add_space(10.0);
+                    
+                    let response = ui.text_edit_singleline(&mut name);
+                    
+                    // Auto-focus the text field
+                    if !response.has_focus() && !response.lost_focus() {
+                        response.request_focus();
+                    }
+                    
+                    // Check for Enter key
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        should_create = true;
+                    }
+                    
+                    // Check for Escape key
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        should_cancel = true;
+                    }
+                    
+                    ui.add_space(20.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Create").clicked() || should_create {
+                            should_create = true;
+                        }
+                        if ui.button("Cancel").clicked() || should_cancel {
+                            should_cancel = true;
+                        }
+                    });
+                });
+            
+            if should_create {
+                // Create the object with the given name
+                if let Some(pool) = &mut self.project {
+                    let mut new_obj = ag_iso_terminal_designer::default_object(object_type);
+                    
+                    // Find first available id
+                    let mut id = 0;
+                    while pool
+                        .get_pool()
+                        .object_by_id(ObjectId::new(id).unwrap_or_default())
+                        .is_some()
+                    {
+                        id += 1;
+                    }
+                    new_obj.mut_id().set_value(id).ok();
+                    
+                    // Add object to pool
+                    pool.get_mut_pool().borrow_mut().add(new_obj.clone());
+                    
+                    // Set the custom name
+                    let mut object_info = pool.object_info.borrow_mut();
+                    let info = object_info
+                        .entry(new_obj.id())
+                        .or_insert_with(|| ag_iso_terminal_designer::ObjectInfo::new(&new_obj));
+                    info.set_name(name);
+                    drop(object_info);
+                    
+                    // Select the new object
+                    pool.get_mut_selected().replace(NullableObjectId::new(id));
+                }
+                self.new_object_dialog = None;
+            } else if should_cancel {
+                self.new_object_dialog = None;
+            } else {
+                // Update the name in the dialog state
+                self.new_object_dialog = Some((object_type, name));
+            }
+        }
+
         egui::TopBottomPanel::top("topbar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 egui::widgets::global_theme_preference_buttons(ui);
@@ -379,11 +483,24 @@ impl eframe::App for DesignerApp {
                 }
 
                 ui.menu_button("File", |ui| {
-                    if ui.button("Load pool").clicked() {
+                    ui.label("Project Files");
+                    if ui.button("Open Project (.aitp)").clicked() {
+                        self.open_file_dialog(FileDialogReason::LoadProject, ctx);
+                        ui.close();
+                    }
+                    if self.project.is_some() && ui.button("Save Project (.aitp)").clicked() {
+                        self.save_project();
+                        ui.close();
+                    }
+                    
+                    ui.separator();
+                    ui.label("ISOBUS Files");
+                    
+                    if ui.button("Import IOP (.iop)").clicked() {
                         self.open_file_dialog(FileDialogReason::LoadPool, ctx);
                         ui.close();
                     }
-                    if self.project.is_some() && ui.button("Save pool").clicked() {
+                    if self.project.is_some() && ui.button("Export IOP (.iop)").clicked() {
                         self.save_pool();
                         ui.close();
                     }
@@ -395,24 +512,10 @@ impl eframe::App for DesignerApp {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             for object_type in ObjectType::values() {
                                 if ui.button(format!("{:?}", object_type)).clicked() {
-                                    let mut new_obj =
-                                        ag_iso_terminal_designer::default_object(object_type);
-                                    let pool = self.project.as_mut().unwrap();
-
-                                    // Find first available id
-                                    let mut id = 0;
-                                    while pool
-                                        .get_pool()
-                                        .object_by_id(ObjectId::new(id).unwrap_or_default())
-                                        .is_some()
-                                    {
-                                        id += 1;
-                                    }
-                                    new_obj.mut_id().set_value(id).ok();
-
-                                    // Add object to pool and select it
-                                    pool.get_mut_pool().borrow_mut().add(new_obj);
-                                    pool.get_mut_selected().replace(NullableObjectId::new(id));
+                                    // Generate smart default name
+                                    let pool = self.project.as_ref().unwrap();
+                                    let default_name = pool.generate_smart_name_for_new_object(object_type);
+                                    self.new_object_dialog = Some((object_type, default_name));
                                     ui.close();
                                 }
                             }
@@ -561,10 +664,18 @@ impl eframe::App for DesignerApp {
                     match pool.get_pool().working_set_object() {
                         Some(mask) => match pool.get_pool().object_by_id(mask.active_mask) {
                             Some(obj) => {
+                                let selected_ref = pool.get_mut_selected();
+                                
                                 egui::ScrollArea::both().show(ui, |ui| {
                                     ui.add_sized(
                                         [pool.mask_size as f32, pool.mask_size as f32],
-                                        ObjectWrapper::new(obj, pool.get_pool()),
+                                        InteractiveMaskRenderer {
+                                            object: obj,
+                                            pool: pool.get_pool(),
+                                            selected_callback: Box::new(move |object_id| {
+                                                *selected_ref.borrow_mut() = NullableObjectId(Some(object_id));
+                                            }),
+                                        },
                                     );
                                 });
                             }

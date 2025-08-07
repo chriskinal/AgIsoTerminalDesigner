@@ -13,7 +13,7 @@ pub struct ObjectInfo {
 
     /// Optional name for the object.
     /// This is used to give the object a name throughout the editor that is more human-readable
-    name: Option<String>,
+    pub name: Option<String>,
 }
 
 impl ObjectInfo {
