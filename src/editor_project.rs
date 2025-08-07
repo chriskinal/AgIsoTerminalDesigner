@@ -27,11 +27,22 @@ pub struct EditorProject {
 
     /// Used to keep track of the object that is being renamed
     renaming_object: RefCell<Option<(eframe::egui::Id, ObjectId, String)>>,
+    
+    /// Cached next available ID for efficient allocation
+    next_available_id: RefCell<u16>,
 }
 
 impl From<ObjectPool> for EditorProject {
     fn from(pool: ObjectPool) -> Self {
         let (mask_size, soft_key_size) = pool.get_minimum_mask_sizes();
+        
+        // Find the highest ID in use to initialize next_available_id
+        let max_id = pool.objects()
+            .iter()
+            .map(|obj| obj.id().value())
+            .max()
+            .unwrap_or(0);
+        
         EditorProject {
             mut_pool: RefCell::new(pool.clone()),
             pool,
@@ -45,6 +56,7 @@ impl From<ObjectPool> for EditorProject {
             soft_key_size,
             object_info: RefCell::new(HashMap::new()),
             renaming_object: RefCell::new(None),
+            next_available_id: RefCell::new(max_id.saturating_add(1)),
         }
     }
 }
@@ -53,6 +65,42 @@ impl EditorProject {
     /// Get the current object pool
     pub fn get_pool(&self) -> &ObjectPool {
         &self.pool
+    }
+    
+    /// Allocate a new unique object ID efficiently
+    pub fn allocate_object_id(&self) -> ObjectId {
+        let mut next_id = self.next_available_id.borrow_mut();
+        
+        // Find the next available ID starting from our cached value
+        while self.pool.object_by_id(ObjectId::new(*next_id).unwrap_or_default()).is_some() {
+            *next_id = next_id.saturating_add(1);
+            
+            // Handle wraparound at u16::MAX
+            if *next_id == 0 {
+                // If we've wrapped around, do a full scan to find any gaps
+                for id in 1..=u16::MAX {
+                    if self.pool.object_by_id(ObjectId::new(id).unwrap_or_default()).is_none() {
+                        *next_id = id;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        
+        let allocated_id = ObjectId::new(*next_id).unwrap_or_default();
+        *next_id = next_id.saturating_add(1);
+        allocated_id
+    }
+    
+    /// Update the next available ID cache based on the current pool
+    fn update_next_available_id(&self) {
+        let max_id = self.pool.objects()
+            .iter()
+            .map(|obj| obj.id().value())
+            .max()
+            .unwrap_or(0);
+        self.next_available_id.replace(max_id.saturating_add(1));
     }
 
     /// Get the current selected object
@@ -99,6 +147,9 @@ impl EditorProject {
             // Both need to be replaced here because otherwise it will be added to the undo history
             self.pool = pool.clone();
             self.mut_pool.replace(pool);
+            
+            // Update next_available_id based on the new pool state
+            self.update_next_available_id();
         }
     }
 
@@ -114,6 +165,9 @@ impl EditorProject {
             // Both need to be replaced here because otherwise the redo history will be cleared
             self.pool = pool.clone();
             self.mut_pool.replace(pool);
+            
+            // Update next_available_id based on the new pool state
+            self.update_next_available_id();
         }
     }
 
@@ -221,7 +275,7 @@ impl EditorProject {
                 info.get_name(object)
             } else {
                 // Generate default name without modifying the map
-                format!("{:?}: {:?}", u16::from(object.id()), object.object_type())
+                format!("Object {} ({})", object.id().value(), smart_naming::get_object_type_name(object.object_type()))
             };
             *names.entry(name).or_insert(0) += 1;
         }
@@ -239,33 +293,110 @@ impl EditorProject {
         smart_naming::generate_contextual_name(object, &self.pool)
     }
 
-    /// Apply smart naming to an existing object if it doesn't have a custom name
-    pub fn apply_smart_naming_to_object(&self, object: &Object) {
-        // Check if the object already has a name without holding a borrow
-        let needs_naming = {
-            let object_info = self.object_info.borrow();
-            object_info.get(&object.id()).map_or(true, |info| info.name.is_none())
-        };
-        
-        if !needs_naming {
+    /// Apply smart naming to multiple objects efficiently
+    /// This is more efficient than calling apply_smart_naming_to_object repeatedly
+    pub fn apply_smart_naming_to_objects(&self, objects: &[&Object]) {
+        if objects.is_empty() {
             return;
         }
         
-        // First try contextual naming
-        let new_name = if let Some(contextual_name) = smart_naming::generate_contextual_name(object, &self.pool) {
-            contextual_name
-        } else {
-            // Get existing names before borrowing object_info mutably
-            let existing_names = self.get_all_object_names();
-            smart_naming::generate_smart_default_name(
+        let mut object_info = self.object_info.borrow_mut();
+        let mut objects_needing_names = Vec::new();
+        
+        // First pass: check which objects need naming and try contextual naming
+        for object in objects {
+            // Skip if already has a custom name
+            if let Some(info) = object_info.get(&object.id()) {
+                if info.name.is_some() {
+                    continue;
+                }
+            }
+            
+            // Try contextual naming first (cheap operation)
+            if let Some(contextual_name) = smart_naming::generate_contextual_name(object, &self.pool) {
+                let info = object_info
+                    .entry(object.id())
+                    .or_insert_with(|| ObjectInfo::new(object));
+                info.set_name(contextual_name);
+            } else {
+                objects_needing_names.push(*object);
+            }
+        }
+        
+        // If all objects got contextual names, we're done
+        if objects_needing_names.is_empty() {
+            return;
+        }
+        
+        // Build existing names map once for all remaining objects
+        let mut existing_names = HashMap::new();
+        for obj in self.pool.objects() {
+            let name = if let Some(info) = object_info.get(&obj.id()) {
+                info.get_name(obj)
+            } else {
+                format!("Object {} ({})", obj.id().value(), smart_naming::get_object_type_name(obj.object_type()))
+            };
+            *existing_names.entry(name).or_insert(0) += 1;
+        }
+        
+        // Generate names for remaining objects
+        for object in objects_needing_names {
+            let new_name = smart_naming::generate_smart_default_name(
                 object.object_type(),
                 &self.pool,
                 &existing_names,
-            )
-        };
-        
-        // Now apply the name
+            );
+            
+            // Update the count for the new name to ensure uniqueness
+            *existing_names.entry(new_name.clone()).or_insert(0) += 1;
+            
+            let info = object_info
+                .entry(object.id())
+                .or_insert_with(|| ObjectInfo::new(object));
+            info.set_name(new_name);
+        }
+    }
+    
+    /// Apply smart naming to an existing object if it doesn't have a custom name
+    pub fn apply_smart_naming_to_object(&self, object: &Object) {
         let mut object_info = self.object_info.borrow_mut();
+        
+        // Check if the object already has a name
+        if let Some(info) = object_info.get(&object.id()) {
+            if info.name.is_some() {
+                return; // Already has a custom name
+            }
+        }
+        
+        // First try contextual naming which is cheap
+        if let Some(contextual_name) = smart_naming::generate_contextual_name(object, &self.pool) {
+            let info = object_info
+                .entry(object.id())
+                .or_insert_with(|| ObjectInfo::new(object));
+            info.set_name(contextual_name);
+            return;
+        }
+        
+        // Only build the expensive names map if contextual naming failed
+        // Build names map inline to avoid extra iteration
+        let mut existing_names = HashMap::new();
+        for obj in self.pool.objects() {
+            let name = if let Some(info) = object_info.get(&obj.id()) {
+                info.get_name(obj)
+            } else if obj.id() == object.id() {
+                continue; // Skip the object we're naming
+            } else {
+                format!("Object {} ({})", obj.id().value(), smart_naming::get_object_type_name(obj.object_type()))
+            };
+            *existing_names.entry(name).or_insert(0) += 1;
+        }
+        
+        let new_name = smart_naming::generate_smart_default_name(
+            object.object_type(),
+            &self.pool,
+            &existing_names,
+        );
+        
         let info = object_info
             .entry(object.id())
             .or_insert_with(|| ObjectInfo::new(object));
@@ -292,9 +423,10 @@ impl EditorProject {
     }
 
     /// Load a project from file data
-    pub fn load_project(data: Vec<u8>) -> Result<Self, serde_json::Error> {
-        let project = ProjectFile::from_bytes(&data)?;
-        let pool = project.load_pool();
+    pub fn load_project(data: Vec<u8>) -> Result<Self, String> {
+        let project = ProjectFile::from_bytes(&data)
+            .map_err(|e| format!("Failed to parse project file: {}", e))?;
+        let pool = project.load_pool()?;
         let settings = project.get_settings();
         
         let mut editor_project = EditorProject::from(pool);

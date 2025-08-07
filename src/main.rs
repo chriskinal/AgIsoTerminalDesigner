@@ -32,6 +32,7 @@ pub struct DesignerApp {
     file_channel: (Sender<Vec<u8>>, Receiver<Vec<u8>>),
     show_development_popup: bool,
     new_object_dialog: Option<(ObjectType, String)>,
+    apply_smart_naming_on_import: bool,
 }
 
 impl DesignerApp {
@@ -111,6 +112,7 @@ impl DesignerApp {
             file_channel: std::sync::mpsc::channel(),
             show_development_popup: true,
             new_object_dialog: None,
+            apply_smart_naming_on_import: true, // Default to true for better UX
         }
     }
 }
@@ -139,9 +141,10 @@ impl DesignerApp {
             match self.file_dialog_reason {
                 Some(FileDialogReason::LoadPool) => {
                     let project = EditorProject::from(ObjectPool::from_iop(content));
-                    // Apply smart naming to all objects that don't have custom names
-                    for object in project.get_pool().objects() {
-                        project.apply_smart_naming_to_object(object);
+                    // Apply smart naming to all objects that don't have custom names (if enabled)
+                    if self.apply_smart_naming_on_import {
+                        let objects: Vec<&Object> = project.get_pool().objects().iter().collect();
+                        project.apply_smart_naming_to_objects(&objects);
                     }
                     self.project = Some(project);
                 }
@@ -411,16 +414,9 @@ impl eframe::App for DesignerApp {
                 if let Some(pool) = &mut self.project {
                     let mut new_obj = ag_iso_terminal_designer::default_object(object_type);
                     
-                    // Find first available id
-                    let mut id = 0;
-                    while pool
-                        .get_pool()
-                        .object_by_id(ObjectId::new(id).unwrap_or_default())
-                        .is_some()
-                    {
-                        id += 1;
-                    }
-                    new_obj.mut_id().set_value(id).ok();
+                    // Allocate a new ID efficiently
+                    let id = pool.allocate_object_id();
+                    new_obj.mut_id().set_value(id.value()).ok();
                     
                     // Add object to pool
                     pool.get_mut_pool().borrow_mut().add(new_obj.clone());
@@ -434,7 +430,7 @@ impl eframe::App for DesignerApp {
                     drop(object_info);
                     
                     // Select the new object
-                    pool.get_mut_selected().replace(NullableObjectId::new(id));
+                    pool.get_mut_selected().replace(NullableObjectId::new(id.value()));
                 }
                 self.new_object_dialog = None;
             } else if should_cancel {
@@ -500,6 +496,9 @@ impl eframe::App for DesignerApp {
                         self.open_file_dialog(FileDialogReason::LoadPool, ctx);
                         ui.close();
                     }
+                    
+                    ui.checkbox(&mut self.apply_smart_naming_on_import, "Apply smart naming on import")
+                        .on_hover_text("Automatically apply smart naming to objects when importing IOP files");
                     if self.project.is_some() && ui.button("Export IOP (.iop)").clicked() {
                         self.save_pool();
                         ui.close();

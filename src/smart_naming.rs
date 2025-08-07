@@ -5,29 +5,11 @@
 use ag_iso_stack::object_pool::{object::Object, ObjectPool, ObjectType};
 use std::collections::HashMap;
 
-/// Generates a smart default name for an object based on its type and context
-pub fn generate_smart_default_name(
-    object_type: ObjectType,
-    pool: &ObjectPool,
-    existing_names: &HashMap<String, usize>,
-) -> String {
-    // Count existing objects of the same type
-    let same_type_count = pool
-        .objects()
-        .iter()
-        .filter(|obj| obj.object_type() == object_type)
-        .count();
-
-    // Generate base name based on object type
-    let base_name = match object_type {
+/// Get a user-friendly name for an object type
+pub fn get_object_type_name(object_type: ObjectType) -> &'static str {
+    match object_type {
         ObjectType::WorkingSet => "Working Set",
-        ObjectType::DataMask => {
-            if same_type_count == 0 {
-                "Main Screen"
-            } else {
-                "Data Screen"
-            }
-        }
+        ObjectType::DataMask => "Data Mask",
         ObjectType::AlarmMask => "Alarm Screen",
         ObjectType::Container => "Container",
         ObjectType::SoftKeyMask => "Soft Key Mask",
@@ -75,6 +57,32 @@ pub fn generate_smart_default_name(
         ObjectType::ExternalReferenceName => "External Reference Name",
         ObjectType::ExternalObjectPointer => "External Object Pointer",
         ObjectType::Animation => "Animation",
+    }
+}
+
+/// Generates a smart default name for an object based on its type and context
+pub fn generate_smart_default_name(
+    object_type: ObjectType,
+    pool: &ObjectPool,
+    existing_names: &HashMap<String, usize>,
+) -> String {
+    // Count existing objects of the same type
+    let same_type_count = pool
+        .objects()
+        .iter()
+        .filter(|obj| obj.object_type() == object_type)
+        .count();
+
+    // Generate base name based on object type
+    let base_name = match object_type {
+        ObjectType::DataMask => {
+            if same_type_count == 0 {
+                "Main Screen"
+            } else {
+                "Data Screen"
+            }
+        }
+        _ => get_object_type_name(object_type),
     };
 
     // If this is the first of its type and has a special name, use it
@@ -83,7 +91,7 @@ pub fn generate_smart_default_name(
     }
 
     // Check if the base name already exists
-    if !existing_names.contains_key(base_name) && same_type_count == 0 {
+    if existing_names.get(base_name).copied().unwrap_or(0) == 0 && same_type_count == 0 {
         return base_name.to_string();
     }
 
@@ -91,7 +99,7 @@ pub fn generate_smart_default_name(
     let mut counter = same_type_count + 1;
     loop {
         let candidate = format!("{} {}", base_name, counter);
-        if !existing_names.contains_key(&candidate) {
+        if existing_names.get(&candidate).copied().unwrap_or(0) == 0 {
             return candidate;
         }
         counter += 1;
@@ -181,16 +189,18 @@ pub fn validate_and_suggest_name(name: &str, existing_names: &HashMap<String, us
         return Err("Name is too long (max 100 characters)".to_string());
     }
     
-    if existing_names.contains_key(name) {
+    if existing_names.get(name).copied().unwrap_or(0) > 0 {
         // Suggest an alternative
+        const MAX_OBJECTS: u32 = 65535; // ISOBUS maximum object count (16-bit IDs)
         let mut counter = 2;
-        loop {
+        while counter <= MAX_OBJECTS {
             let suggestion = format!("{} {}", name, counter);
-            if !existing_names.contains_key(&suggestion) {
+            if existing_names.get(&suggestion).copied().unwrap_or(0) == 0 {
                 return Err(format!("Name '{}' already exists. Try '{}'", name, suggestion));
             }
             counter += 1;
         }
+        return Err(format!("Name '{}' already exists and all numbered variations up to {} are taken", name, MAX_OBJECTS));
     }
     
     Ok(())

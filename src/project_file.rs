@@ -77,8 +77,23 @@ impl ProjectFile {
     }
     
     /// Load object pool from project file
-    pub fn load_pool(&self) -> ObjectPool {
-        ObjectPool::from_iop(self.object_pool_data.clone())
+    /// Returns an error if the object pool data is corrupted or invalid
+    pub fn load_pool(&self) -> Result<ObjectPool, String> {
+        // Validate minimum size for a valid IOP file
+        if self.object_pool_data.len() < 4 {
+            return Err("Object pool data is too small to be valid".to_string());
+        }
+        
+        // Try to parse the object pool
+        let pool = ObjectPool::from_iop(self.object_pool_data.clone());
+        
+        // Validate that we got a non-empty pool
+        // Note: This is a heuristic check since from_iop might return an empty pool for invalid data
+        if pool.objects().is_empty() && self.object_pool_data.len() > 4 {
+            return Err("Failed to parse object pool: no objects found in data".to_string());
+        }
+        
+        Ok(pool)
     }
     
     /// Get object metadata
@@ -110,3 +125,4 @@ impl Default for ProjectSettings {
         }
     }
 }
+
