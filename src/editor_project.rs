@@ -30,6 +30,9 @@ pub struct EditorProject {
     
     /// Cached next available ID for efficient allocation
     next_available_id: RefCell<u16>,
+    
+    /// Cached default object names for efficient lookup
+    default_object_names: RefCell<HashMap<ObjectId, String>>,
 }
 
 impl From<ObjectPool> for EditorProject {
@@ -57,6 +60,7 @@ impl From<ObjectPool> for EditorProject {
             object_info: RefCell::new(HashMap::new()),
             renaming_object: RefCell::new(None),
             next_available_id: RefCell::new(max_id.saturating_add(1)),
+            default_object_names: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -78,11 +82,16 @@ impl EditorProject {
             // Handle wraparound at u16::MAX
             if *next_id == 0 {
                 // If we've wrapped around, do a full scan to find any gaps
+                let mut found = false;
                 for id in 1..=u16::MAX {
                     if self.pool.object_by_id(ObjectId::new(id).unwrap_or_default()).is_none() {
                         *next_id = id;
+                        found = true;
                         break;
                     }
+                }
+                if !found {
+                    panic!("No available ObjectId: all IDs from 1 to u16::MAX are taken.");
                 }
                 break;
             }
@@ -134,6 +143,8 @@ impl EditorProject {
                     .drain(..self.undo_pool_history.len() - MAX_UNDO_REDO_POOL);
             }
             self.pool = self.mut_pool.borrow().clone();
+            // Clear the default names cache since objects may have changed
+            self.default_object_names.borrow_mut().clear();
             return true;
         }
         false
@@ -150,6 +161,9 @@ impl EditorProject {
             
             // Update next_available_id based on the new pool state
             self.update_next_available_id();
+            
+            // Clear the default names cache since objects may have changed
+            self.default_object_names.borrow_mut().clear();
         }
     }
 
@@ -168,6 +182,9 @@ impl EditorProject {
             
             // Update next_available_id based on the new pool state
             self.update_next_available_id();
+            
+            // Clear the default names cache since objects may have changed
+            self.default_object_names.borrow_mut().clear();
         }
     }
 
@@ -269,13 +286,16 @@ impl EditorProject {
     pub fn get_all_object_names(&self) -> HashMap<String, usize> {
         let mut names = HashMap::new();
         let object_info = self.object_info.borrow();
+        let mut default_names_cache = self.default_object_names.borrow_mut();
         
         for object in self.pool.objects() {
             let name = if let Some(info) = object_info.get(&object.id()) {
                 info.get_name(object)
             } else {
-                // Generate default name without modifying the map
-                format!("Object {} ({})", object.id().value(), smart_naming::get_object_type_name(object.object_type()))
+                // Use cached default name if available, otherwise generate and cache it
+                default_names_cache.entry(object.id()).or_insert_with(|| {
+                    format!("Object {} ({})", object.id().value(), smart_naming::get_object_type_name(object.object_type()))
+                }).clone()
             };
             *names.entry(name).or_insert(0) += 1;
         }
@@ -330,11 +350,14 @@ impl EditorProject {
         
         // Build existing names map once for all remaining objects
         let mut existing_names = HashMap::new();
+        let mut default_names_cache = self.default_object_names.borrow_mut();
         for obj in self.pool.objects() {
             let name = if let Some(info) = object_info.get(&obj.id()) {
                 info.get_name(obj)
             } else {
-                format!("Object {} ({})", obj.id().value(), smart_naming::get_object_type_name(obj.object_type()))
+                default_names_cache.entry(obj.id()).or_insert_with(|| {
+                    format!("Object {} ({})", obj.id().value(), smart_naming::get_object_type_name(obj.object_type()))
+                }).clone()
             };
             *existing_names.entry(name).or_insert(0) += 1;
         }
@@ -380,13 +403,16 @@ impl EditorProject {
         // Only build the expensive names map if contextual naming failed
         // Build names map inline to avoid extra iteration
         let mut existing_names = HashMap::new();
+        let mut default_names_cache = self.default_object_names.borrow_mut();
         for obj in self.pool.objects() {
             let name = if let Some(info) = object_info.get(&obj.id()) {
                 info.get_name(obj)
             } else if obj.id() == object.id() {
                 continue; // Skip the object we're naming
             } else {
-                format!("Object {} ({})", obj.id().value(), smart_naming::get_object_type_name(obj.object_type()))
+                default_names_cache.entry(obj.id()).or_insert_with(|| {
+                    format!("Object {} ({})", obj.id().value(), smart_naming::get_object_type_name(obj.object_type()))
+                }).clone()
             };
             *existing_names.entry(name).or_insert(0) += 1;
         }

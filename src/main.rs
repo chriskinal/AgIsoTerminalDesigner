@@ -140,7 +140,7 @@ impl DesignerApp {
         if let Ok(content) = self.file_channel.1.try_recv() {
             match self.file_dialog_reason {
                 Some(FileDialogReason::LoadPool) => {
-                    let project = EditorProject::from(ObjectPool::from_iop(content));
+                    let mut project = EditorProject::from(ObjectPool::from_iop(content));
                     // Apply smart naming to all objects that don't have custom names (if enabled)
                     if self.apply_smart_naming_on_import {
                         let objects: Vec<&Object> = project.get_pool().objects().iter().collect();

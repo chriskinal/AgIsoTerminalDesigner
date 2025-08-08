@@ -5,6 +5,9 @@
 use ag_iso_stack::object_pool::{object::Object, ObjectPool, ObjectType};
 use std::collections::HashMap;
 
+/// ISOBUS maximum object count (16-bit IDs)
+const MAX_OBJECTS: u32 = 65535;
+
 /// Get a user-friendly name for an object type
 pub fn get_object_type_name(object_type: ObjectType) -> &'static str {
     match object_type {
@@ -191,7 +194,6 @@ pub fn validate_and_suggest_name(name: &str, existing_names: &HashMap<String, us
     
     if existing_names.get(name).copied().unwrap_or(0) > 0 {
         // Suggest an alternative
-        const MAX_OBJECTS: u32 = 65535; // ISOBUS maximum object count (16-bit IDs)
         let mut counter = 2;
         while counter <= MAX_OBJECTS {
             let suggestion = format!("{} {}", name, counter);

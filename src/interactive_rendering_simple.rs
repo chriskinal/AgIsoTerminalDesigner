@@ -50,7 +50,7 @@ impl<'a> egui::Widget for InteractiveMaskRenderer<'a> {
                             screen_rect,
                             0.0,
                             egui::Stroke::new(2.0, egui::Color32::from_rgba_premultiplied(255, 255, 0, 200)),
-                            egui::StrokeKind::Middle
+                            egui::epaint::StrokeKind::Middle
                         );
                         
                         // Draw circle at pointer position
