@@ -239,7 +239,8 @@ fn render_selectable_object(ui: &mut egui::Ui, object: &Object, project: &Editor
         }
     } else {
         let is_selected = project.get_selected() == object.id().into();
-        let response = ui.selectable_label(is_selected, object_info.get_name(object));
+        let label_text = format!("{}: {}", u16::from(object.id()), object_info.get_name(object));
+        let response = ui.selectable_label(is_selected, label_text);
 
         if response.clicked() {
             project
@@ -582,12 +583,6 @@ impl eframe::App for DesignerApp {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_space(ui.spacing().scroll.bar_width);
                             ui.menu_button("\u{2195}", |ui| {
-                                if ui.button("Sort by type").clicked() {
-                                    pool.sort_objects_by(|a, b| {
-                                        u8::from(a.object_type()).cmp(&u8::from(b.object_type()))
-                                    });
-                                    ui.close();
-                                }
                                 if ui.button("Sort by name").clicked() {
                                     let pool_copy = pool.clone();
                                     pool.sort_objects_by(|a, b| {
@@ -699,6 +694,23 @@ impl eframe::App for DesignerApp {
             egui::SidePanel::right("right_panel").show(ctx, |ui: &mut egui::Ui| {
                 if let Some(id) = pool.get_selected().into() {
                     if let Some(obj) = pool.get_mut_pool().borrow_mut().object_mut_by_id(id) {
+                        // Display editable object name as header
+                        ui.horizontal(|ui| {
+                            ui.label("Name:");
+                            
+                            let object_info = pool.get_object_info(obj);
+                            let mut name = object_info.get_name(obj);
+                            let response = ui.text_edit_singleline(&mut name);
+                            
+                            if response.changed() {
+                                let mut object_info_map = pool.object_info.borrow_mut();
+                                if let Some(info) = object_info_map.get_mut(&obj.id()) {
+                                    info.set_name(name);
+                                }
+                            }
+                        });
+                        ui.separator();
+                        
                         obj.render_parameters(ui, pool);
                         let (width, height) = pool.get_pool().content_size(obj);
                         ui.separator();
